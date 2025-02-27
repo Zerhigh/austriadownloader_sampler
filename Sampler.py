@@ -3,6 +3,7 @@ import os.path
 import geopandas as gpd
 import numpy as np
 import rasterio
+import pandas as pd
 import shapely
 from rasterio.mask import mask
 from rasterio.warp import calculate_default_transform, reproject, Resampling
@@ -164,7 +165,7 @@ class Sampler:
             self.process_corine()
             self.corine = rasterio.open(self.outpath_cropped_corine)
 
-    def even_sample(self, geometry, config):
+    def even_sample(self, gdf, config):
         """Generate an evenly spaced grid of centroids over a given geometry.
 
         Args:
@@ -175,63 +176,75 @@ class Sampler:
             geopandas.GeoDataFrame: Grid of centroid points within the geometry.
         """
         # Get bounding box
-        minx, miny, maxx, maxy = geometry.bounds
+        # iterate over all provided aois
+        cell_size = config.pixel_size * config.shape[1]
+        point_list = []
+
+        minx, miny, maxx, maxy = gdf.iloc[0].geometry.bounds
 
         # Create a grid of points
         x_coords = np.arange(minx, maxx, cell_size) + (cell_size / 2)
         y_coords = np.arange(miny, maxy, cell_size) + (cell_size / 2)
 
-        # Generate centroid points
-        points = [Point(x, y) for x in x_coords for y in y_coords]
+        return [Point(x, y) for x in x_coords for y in y_coords]
 
-        # Filter points inside the geometry
-        grid_points = [pt for pt in points if geometry.contains(pt)]
+    def filter_samples(self, gdf):
+        # filter noData values
+        points_corine_filtered = gdf.drop(gdf[gdf['value'] == self.corine.nodata].index)
+        if len(points_corine_filtered) != len(gdf) and self.verbose:
+            print(f'Dropped {len(gdf) - len(points_corine_filtered)} entries due to NoData values.')
 
-        # Convert to GeoDataFrame
-        return gpd.GeoDataFrame(geometry=grid_points, crs="EPSG:4326")
+        # assign text landcover
+        points_corine_filtered['clc_str'] = points_corine_filtered.apply(
+            lambda row: self.corine_landcover[row['value']], axis=1)
 
-    def generate_sample(self, num_points, aoi=None, sample='random', to_sample_crs='EPSG:4326', rng=1414):
+        # fulfill stratification
+
+        return points_corine_filtered
+
+    def generate_sample(self, num_points, aoi=None, sample_method='random', to_sample_crs='EPSG:4326', rng=1414):
         if self.corine is None:
             print('Corine Dataset not loaded... loading now')
             self.load_corine()
+        # if aoi is None:
+        #     aoi = self.border_austria
+        #     if sample_method == 'random':
+        #         sample = aoi.sample_points(size=num_points, rng=rng)
+        #     else:
+        #         sample = self.even_sample(geometry=aoi, config=self.config)
+        #     points = gpd.GeoDataFrame(geometry=[p for p in sample[0].geoms], crs=aoi.crs)
+        # else:
+        #     if sample_method == 'random':
+        #         sample = aoi.sample_points(size=num_points, rng=rng)
+        #     else:
+        #         sample = self.even_sample(geometry=aoi, config=self.config)
+        #     # switched coords from wgs84 to european system
+        #     points = gpd.GeoDataFrame(geometry=[shapely.Point(p.y, p.x) for p in sample[0].geoms], crs=aoi.crs)
+
         if aoi is None:
             aoi = self.border_austria
-            if sample == 'random':
-                sample = aoi.sample_points(size=num_points, rng=rng)
-            else:
-                sample = ''
+        if sample_method == 'random':
+            sample = aoi.sample_points(size=num_points, rng=rng)
             points = gpd.GeoDataFrame(geometry=[p for p in sample[0].geoms], crs=aoi.crs)
         else:
-            sample = aoi.sample_points(size=num_points, rng=rng)
-            if sample == 'random':
-                sample = aoi.sample_points(size=num_points, rng=rng)
-            else:
-                sample = ''
-            # switched coords from wgs84 to european system
-            points = gpd.GeoDataFrame(geometry=[shapely.Point(p.y, p.x) for p in sample[0].geoms], crs=aoi.crs)
+            sample = self.even_sample(gdf=aoi, config=self.config)
+            points = gpd.GeoDataFrame(geometry=sample, crs=aoi.crs)
 
         # convert series to corine crs to query landcover
-        points_corine = points.to_crs(crs=self.corine.crs)
-        coord_list = [(x, y) for x, y in zip(points_corine["geometry"].x, points_corine["geometry"].y)]
-        points_corine['value'] = [x[0] for x in self.corine.sample(coord_list)]
+        assert points.crs == self.lambert and self.corine.crs == self.lambert
 
-        # filter noData values
-        points_corine_filtered = points_corine.drop(points_corine[points_corine['value'] == self.corine.nodata].index)
-        if len(points_corine_filtered) != len(points_corine) and self.verbose:
-            print(f'Dropped {len(points_corine) - len(points_corine_filtered)} entries due to NoData values.')
+        coord_list = [(x, y) for x, y in zip(points["geometry"].x, points["geometry"].y)]
+        points['value'] = [x[0] for x in self.corine.sample(coord_list)]
 
-        # assign text landcover
-        points_corine_filtered['clc_str'] = points_corine_filtered.apply(lambda row: self.corine_landcover[row['value']], axis=1)
-
+        points_corine_filtered = self.filter_samples(gdf=points)
         if points_corine_filtered.crs != to_sample_crs:
             points_corine_filtered.to_crs(crs=to_sample_crs, inplace=True)
 
         if self.verbose:
             print(f'Generated {len(points_corine_filtered)} sample points in given AOI.')
-        points_corine_filtered.to_file('output/sample.gpkg', driver='GPKG')
+        points_corine_filtered.to_file(f'output/sample_{sample_method}.gpkg', driver='GPKG')
 
         return
-
 
 
 config = Config(pixel_size=1.6, shape=(4, 1024, 1024))
@@ -243,10 +256,15 @@ sampler = Sampler(sample_path='',
 
 sampler.load_corine()
 
-aoi_bbox = shapely.box(47.9290294921047, 16.073601498323555, 47.95607947801313, 16.133786632464748)
-aoi = gpd.GeoDataFrame(geometry=[aoi_bbox], crs='EPSG:4326')
 
-#sampler.generate_sample(num_points=50, aoi=None, sample='even')
+# aoi_bbox = shapely.box(47.9290294921047, 16.073601498323555, 47.95607947801313, 16.133786632464748)
+# aoi = gpd.GeoDataFrame(geometry=[aoi_bbox], crs='EPSG:4236')
+
+aoi_bbox = shapely.box(616294, 472362.1, 631819, 490055)
+aoi = gpd.GeoDataFrame(geometry=[aoi_bbox], crs='EPSG:31287')
+
+sampler.generate_sample(num_points=50, aoi=aoi, sample_method='even')
+sampler.generate_sample(num_points=50, aoi=aoi, sample_method='random')
 
 pass
 # t.crop_full_corine()
