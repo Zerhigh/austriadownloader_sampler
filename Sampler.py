@@ -8,6 +8,7 @@ import shapely
 from rasterio.mask import mask
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from shapely.geometry import Point
+from tqdm import tqdm
 
 
 class Config:
@@ -17,9 +18,15 @@ class Config:
 
 
 class Stratification:
-    def __init__(self, clc_distribution, window_treshhold=0.3):
+    def __init__(self, clc_distribution, num_samples='max', window_treshhold=0.3):
         self.clc_distribution = clc_distribution
         self.window_treshhold = window_treshhold
+        self.num_samples = num_samples
+
+        @property
+        def clc_filtered(self):
+            return {k: v for k, v in self.clc_distribution.items() if v > 0}
+
 
 
 
@@ -331,24 +338,128 @@ class Sampler:
         # points_corine_filtered['agg_class'] = points_corine_filtered.apply(
         #     lambda row: self.clc_agg[row['corine']], axis=1)
 
+        if self.verbose:
+            print('Filtering points..')
+
         # iterate over each sampled point and check if subclasses are included in this extracted window
-        for i, row in points_corine_filtered.iterrows():
+        for i, row in tqdm(points_corine_filtered.iterrows()):
             _, vals, counts = self.filter_window(pt=row.geometry)
             csum = np.sum(counts)
+            if self.corine.nodata in vals:
+                pass
             # calculate the percentage of each class in this window, if it exceeds the treshhold include it a attribute
-            dist = {v: c/csum for v, c in zip(vals, counts)}
+            dist = {v: c/csum for v, c in zip(vals, counts) if v != self.corine.nodata}
 
             # go over distributions if its over the threshhold change its flag to true
             for k, v in dist.items():
                 if v >= self.stratification.window_treshhold:
-                    points_corine_filtered.at[i, k] = True
+                    points_corine_filtered.at[i, f'{k}'] = 1
+                    # save space in dataframe
+                    points_corine_filtered.at[i, f'{k}_dist'] = int(round(v, 2)*100)
 
-            pass
-            pass
 
         # fulfill stratification
         #avail_classes = set(points_corine_filtered['corine_str'].values)
         return points_corine_filtered
+
+    def select_samples(self, df):
+        # select all classes for strtification
+        clc_strats = {k: v for k, v in self.stratification.clc_distribution.items() if v > 0}
+        strat_df = df.drop(columns=['2_dist', '5_dist', '6_dist', '7_dist', '2', '5', '6', '7'])
+
+        strat_df['total_prob'] = strat_df[['1_dist', '3_dist', '4_dist']].sum(axis=1)
+        strat_df = strat_df[strat_df['total_prob'] > 0]
+        strat_df[['1_dist', '3_dist', '4_dist']] /= strat_df['total_prob'].values[:, None]
+
+        # Assign a class based on weighted probabilities
+        strat_df['assigned_class'] = [np.random.choice([1, 3, 4], p=row) for row in
+                                      strat_df[['1_dist', '3_dist', '4_dist']].values]
+
+        # Now we can proceed to calculate the desired counts
+        total_samples = len(strat_df)
+
+        # Desired proportions
+        desired_proportions = {1: 0.7, 3: 0.15, 4: 0.15}
+
+        # Calculate desired counts for each class
+        desired_counts = {k: int(total_samples * v) for k, v in desired_proportions.items()}
+
+        # Get current class sizes
+        class_sizes = strat_df['assigned_class'].value_counts()
+
+        # Calculate adjustment factors
+        adjusted_counts = {}
+        for class_label, desired_count in desired_counts.items():
+            current_count = class_sizes.get(class_label, 0)
+            adjusted_counts[class_label] = (desired_count / current_count) if current_count > 0 else 0
+
+        # Adjust the sampling fractions based on the current sizes
+        sampling_fractions = {
+            1: min(1, adjusted_counts.get(1, 0)),  # Avoid oversampling
+            3: min(1, adjusted_counts.get(3, 0)),
+            4: min(1, adjusted_counts.get(4, 0))
+        }
+
+        # Sample based on adjusted probabilities
+        sampled_df = (
+            strat_df.groupby("assigned_class", group_keys=False)
+            .apply(lambda x: x.sample(frac=sampling_fractions[x.name],
+                                      random_state=42) if x.name in sampling_fractions else pd.DataFrame())
+        )
+
+        # Final class distribution check
+        print("\nFinal Sampled Distribution:")
+        print(sampled_df['assigned_class'].value_counts(normalize=True))
+
+
+
+
+        # strat_df['total_prob'] = strat_df[['1_dist', '3_dist', '4_dist']].sum(axis=1)
+        #
+        #
+        # # remove columns not matched by any of the wanted classes: propability is grater than 0m excludes nan values
+        # strat_df = strat_df[strat_df['total_prob'] > 0]
+        # if self.verbose:
+        #     print(f'removed {len(df) - len(strat_df)} rows due to not being matched to the selected classes')
+        #
+        # strat_df[['1_dist', '3_dist', '4_dist']] /= strat_df['total_prob'].values[:, None]
+        #
+        # # Assign a class based on weighted probabilities
+        # strat_df['assigned_class'] = [np.random.choice([1, 3, 4], p=row) for row in strat_df[['1_dist', '3_dist', '4_dist']].values]
+        #
+        # # Stratified sampling based on assigned class
+        # sampled_df = (
+        #     strat_df.groupby("assigned_class", group_keys=False)
+        #     .apply(lambda x: x.sample(frac={1: 0.7, 3: 0.15, 4: 0.15}[x.name], random_state=42))
+        # )
+        # print(sampled_df['assigned_class'].value_counts(normalize=True))
+        pass
+
+        # select smaple size
+        # num_samples = 0
+        # if self.stratification.num_samples == 'max':
+        #     num_samples = len(df)
+        # else:
+        #     num_samples = self.stratification.num_samples
+        #
+        # # sort stratification classes
+        # sorted_strat = dict(sorted(self.stratification.clc_distribution.items(), key=lambda item: item[1], reverse=True))
+        #
+        # for clc, perc in sorted_strat.items():
+        #     if perc == 0:
+        #         break
+        #     df_filtered = df[df[f'{clc}_dist'] > 0]
+        #     df_filtered.sort_values(by=f'{clc}_dist', inplace=True, ascending=False)
+        #
+        #     if int(num_samples * perc) > len(df_filtered):
+        #         clc_break = int(num_samples * perc)
+        #     else:
+        #         clc_break = len(df_filtered)
+        #
+        #     sub_sample = df_filtered[:clc_break]
+        #pass
+
+        return
 
     def generate_sample(self, num_points, aoi=None, sample_method='random', to_sample_crs='EPSG:4326', rng=1414):
         print('Generating samples..')
@@ -372,22 +483,29 @@ class Sampler:
 
         # add class-tagging columns to df
         for col in self.clc_keys:
-            points[col] = False
+            points[f'{col}'] = 0
+            points[f'{col}_dist'] = 0
 
+        # assign attributes to sampeld points basd on window operation
         points_corine_filtered = self.filter_samples(gdf=points)
-        if points_corine_filtered.crs != to_sample_crs:
-            points_corine_filtered.to_crs(crs=to_sample_crs, inplace=True)
+
+        # select saple of points from datarame
+        selected = self.select_samples(df=points_corine_filtered)
+
+        # if points_corine_filtered.crs != to_sample_crs:
+        #     points_corine_filtered.to_crs(crs=to_sample_crs, inplace=True)
 
         if self.verbose:
             print(f'Generated {len(points_corine_filtered)} sample points in given AOI.')
-        points_corine_filtered.to_file(f'output/sample_{sample_method}.gpkg', driver='GPKG')
+        points_corine_filtered.to_file(f'output/sample_{sample_method}_.gpkg', driver='GPKG')
 
         return
 
 
 config = Config(pixel_size=2.5, shape=(4, 512, 512))
-strat = Stratification(clc_distribution={5: None, 3: 0.15, 2: None, 1: 0.7, 4: 0.15, 7: 0, 6: 0},
-                       window_treshhold=0.2)
+strat = Stratification(clc_distribution={5: 0, 3: 0.15, 2: 0, 1: 0.7, 4: 0.15, 7: 0, 6: 0},
+                       window_treshhold=0.2,
+                       num_samples='max')
 
 #{"other": None, "agricultural": 0.15, "water": None, "urban": 0.7, "forest": 0.15, "glacier": 0, "bare_rock": 0}
 #{5: None, 3: 0.15, 2: None, 1: 0.7, 4: 0.15, 7: 0, 6: 0}
@@ -406,7 +524,11 @@ sampler.load_corine()
 # aoi_bbox = shapely.box(47.9290294921047, 16.073601498323555, 47.95607947801313, 16.133786632464748)
 # aoi = gpd.GeoDataFrame(geometry=[aoi_bbox], crs='EPSG:4236')
 
-aoi_bbox = shapely.box(616294, 472362.1, 631819, 490055)
+# greatEr vienna
+aoi_bbox = shapely.box(567222, 445325, 671295, 545245)
+
+# Vienna
+#aoi_bbox = shapely.box(616294, 472362.1, 638000, 491000)
 aoi = gpd.GeoDataFrame(geometry=[aoi_bbox], crs='EPSG:31287')
 
 sampler.generate_sample(num_points=50, aoi=aoi, sample_method='even')
