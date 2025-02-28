@@ -363,6 +363,7 @@ class Sampler:
         return points_corine_filtered
 
     def select_samples(self, df):
+        #rewrite pretty!
         # select smaple size
         num_samples = 0
         if self.stratification.num_samples == 'max':
