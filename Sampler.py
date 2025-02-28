@@ -1,4 +1,5 @@
 import os.path
+import time
 
 import geopandas as gpd
 import numpy as np
@@ -23,12 +24,9 @@ class Stratification:
         self.window_treshhold = window_treshhold
         self.num_samples = num_samples
 
-        @property
-        def clc_filtered(self):
-            return {k: v for k, v in self.clc_distribution.items() if v > 0}
-
-
-
+    @property
+    def clc_filtered(self):
+        return {k: v for k, v in self.clc_distribution.items() if v > 0}
 
 
 class Sampler:
@@ -362,7 +360,7 @@ class Sampler:
         #avail_classes = set(points_corine_filtered['corine_str'].values)
         return points_corine_filtered
 
-    def select_samples(self, df):
+    def select_samplesGPT(self, df):
         # select all classes for strtification
         clc_strats = {k: v for k, v in self.stratification.clc_distribution.items() if v > 0}
         strat_df = df.drop(columns=['2_dist', '5_dist', '6_dist', '7_dist', '2', '5', '6', '7'])
@@ -461,33 +459,90 @@ class Sampler:
 
         return
 
+    def select_samples(self, df):
+        # select smaple size
+        num_samples = 0
+        if self.stratification.num_samples == 'max':
+            num_samples = len(df)
+        else:
+            num_samples = self.stratification.num_samples
+
+        # sort stratification classes
+        sorted_strat = dict(sorted(self.stratification.clc_filtered.items(), key=lambda item: item[1], reverse=True))
+
+        metas = {}
+        meta_prct = {}
+        meta_prct_diffs = {}
+        for clc, perc in sorted_strat.items():
+            df_filtered = df[df[f'{clc}_dist'] > 0].copy()
+            df_filtered.sort_values(by=f'{clc}_dist', inplace=True, ascending=False)
+
+            # check for which class the difference between wanted and sampled classes is the largest
+            metas[clc] = df_filtered
+            meta_prct[clc] = len(df_filtered)/len(df)
+            meta_prct_diffs[clc] = len(df_filtered) / len(df) - sorted_strat[clc]
+
+        sorted_meta_prct_diffs = dict(sorted(meta_prct_diffs.items(), key=lambda item: item[1], reverse=False))
+
+        min_num = []
+
+        for k, v in sorted_meta_prct_diffs.items():
+            # i have less samples available than I would like -> adapt mAximal number of samples possible
+            if v < 0:
+                avail_ = len(metas[k])
+                min_num.append(int(avail_ / sorted_strat[k]))
+            # I have enough samples, just gibe me all of them
+            else:
+                min_num.append(num_samples)
+
+        min_sample = min(min_num)
+
+        # give me the samples with the highest amount of pixels with eAch class in them!
+        agg_dfs = {}
+        for k, v in metas.items():
+            # calculate number of samples of adapted maximal number
+            sample_num = sorted_strat[k] * min_sample
+            agg_dfs[k] = v[:int(sample_num)]
+
+        print('stratification:' + ''.join([f'\n    {round(len(v)/min_sample, 4)}%, {len(v)} of {min_sample} samples for class {k}' for k, v in agg_dfs.items()]))
+        stratified_points = pd.concat(agg_dfs)
+
+        return stratified_points
+
     def generate_sample(self, num_points, aoi=None, sample_method='random', to_sample_crs='EPSG:4326', rng=1414):
         print('Generating samples..')
         if self.corine is None:
             print('Corine Dataset not loaded... loading now')
             self.load_corine()
-        if aoi is None:
-            aoi = self.border_austria
-        if sample_method == 'random':
-            sample = aoi.sample_points(size=num_points, rng=rng)
-            points = gpd.GeoDataFrame(geometry=[p for p in sample[0].geoms], crs=aoi.crs)
+
+        if not os.path.exists(f'output/filtered.gpkg'):
+
+            if aoi is None:
+                aoi = self.border_austria
+            if sample_method == 'random':
+                sample = aoi.sample_points(size=num_points, rng=rng)
+                points = gpd.GeoDataFrame(geometry=[p for p in sample[0].geoms], crs=aoi.crs)
+            else:
+                sample = self.even_sample(gdf=aoi, config=self.config)
+                points = gpd.GeoDataFrame(geometry=sample, crs=aoi.crs)
+
+            # convert series to corine crs to query landcover
+            assert points.crs == self.lambert and self.corine.crs == self.lambert
+
+            coord_list = [(x, y) for x, y in zip(points["geometry"].x, points["geometry"].y)]
+            points['corine'] = [x[0] for x in self.corine.sample(coord_list)]
+
+            # add class-tagging columns to df
+            for col in self.clc_keys:
+                points[f'{col}'] = 0
+                points[f'{col}_dist'] = 0
+
+            # assign attributes to sampeld points basd on window operation
+            points_corine_filtered = self.filter_samples(gdf=points)
+
+            points_corine_filtered.to_file(f'output/filtered.gpkg', driver='GPKG')
         else:
-            sample = self.even_sample(gdf=aoi, config=self.config)
-            points = gpd.GeoDataFrame(geometry=sample, crs=aoi.crs)
-
-        # convert series to corine crs to query landcover
-        assert points.crs == self.lambert and self.corine.crs == self.lambert
-
-        coord_list = [(x, y) for x, y in zip(points["geometry"].x, points["geometry"].y)]
-        points['corine'] = [x[0] for x in self.corine.sample(coord_list)]
-
-        # add class-tagging columns to df
-        for col in self.clc_keys:
-            points[f'{col}'] = 0
-            points[f'{col}_dist'] = 0
-
-        # assign attributes to sampeld points basd on window operation
-        points_corine_filtered = self.filter_samples(gdf=points)
+            points_corine_filtered = gpd.read_file(f'output/filtered.gpkg')
 
         # select saple of points from datarame
         selected = self.select_samples(df=points_corine_filtered)
@@ -496,14 +551,14 @@ class Sampler:
         #     points_corine_filtered.to_crs(crs=to_sample_crs, inplace=True)
 
         if self.verbose:
-            print(f'Generated {len(points_corine_filtered)} sample points in given AOI.')
-        points_corine_filtered.to_file(f'output/sample_{sample_method}_.gpkg', driver='GPKG')
+            print(f'Generated {len(selected)} sample points in given AOI.')
+        selected.to_file(f'output/sample_{sample_method}_stratified.gpkg', driver='GPKG')
 
         return
 
 
 config = Config(pixel_size=2.5, shape=(4, 512, 512))
-strat = Stratification(clc_distribution={5: 0, 3: 0.15, 2: 0, 1: 0.7, 4: 0.15, 7: 0, 6: 0},
+strat = Stratification(clc_distribution={5: 0, 3: 0.15, 2: 0, 1: 0.7, 4: 0.20, 7: 0, 6: 0},
                        window_treshhold=0.2,
                        num_samples='max')
 
@@ -521,17 +576,15 @@ sampler = Sampler(sample_path='',
 sampler.load_corine()
 
 
-# aoi_bbox = shapely.box(47.9290294921047, 16.073601498323555, 47.95607947801313, 16.133786632464748)
-# aoi = gpd.GeoDataFrame(geometry=[aoi_bbox], crs='EPSG:4236')
-
 # greatEr vienna
 aoi_bbox = shapely.box(567222, 445325, 671295, 545245)
-
 # Vienna
 #aoi_bbox = shapely.box(616294, 472362.1, 638000, 491000)
 aoi = gpd.GeoDataFrame(geometry=[aoi_bbox], crs='EPSG:31287')
 
-sampler.generate_sample(num_points=50, aoi=aoi, sample_method='even')
+t1 = time.time()
+sampler.generate_sample(num_points=50, aoi=None, sample_method='even')
+print('sampling for whole Austria [s]: ', round(time.time() - t1, 2))
 #sampler.generate_sample(num_points=50, aoi=aoi, sample_method='random')
 
 pass
