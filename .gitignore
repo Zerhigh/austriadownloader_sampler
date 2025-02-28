@@ -1,6 +1,6 @@
 .idea
 data
-output
+output/*.gpkg
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
