@@ -11,31 +11,8 @@ from rasterio.warp import calculate_default_transform, reproject, Resampling
 from shapely.geometry import Point
 from tqdm import tqdm
 
-
-class Config:
-    def __init__(self, pixel_size=1.6, shape=(4, 1024, 1024)):
-        self.pixel_size = pixel_size
-        self.shape = shape
-
-        # corine defined raster size
-        self.raster_size = 100
-
-    @property
-    def window_size(self):
-        width = (self.pixel_size * self.shape[1]) // 2
-        # reduce window size by 1 to account for sampled pixel width (from 0 to 100m in one direction)
-        return int(np.floor(width / self.raster_size)) - 1
-
-
-class Stratification:
-    def __init__(self, clc_distribution, window_treshhold, num_samples='max'):
-        self.clc_distribution = clc_distribution
-        self.window_treshhold = window_treshhold
-        self.num_samples = num_samples
-
-    @property
-    def clc_filtered(self):
-        return {k: v for k, v in self.clc_distribution.items() if v > 0}
+from imageconfig import ImageConfig
+from stratification import Stratification
 
 
 class Sampler:
@@ -142,13 +119,6 @@ class Sampler:
                         421: "other",
                         422: "other",
                         423: "other"}
-        # 1: urban
-        # 2: water
-        # 3: agricultural
-        # 4: forest
-        # 5: other
-        # 6: bare_rock
-        # 7: glacier
         self.clc_agg_int = {111: 1,  # "urban"
                         112: 1,  # "urban"
                         121: 1,  # "urban"
@@ -472,8 +442,15 @@ class Sampler:
         return
 
 
-config = Config(pixel_size=2.5, shape=(4, 512, 512))
-strat = Stratification(clc_distribution={5: 0, 3: 0.15, 2: 0, 1: 0.7, 4: 0.20, 7: 0, 6: 0},
+# 1: urban
+# 2: water
+# 3: agricultural
+# 4: forest
+# 5: other
+# 6: bare_rock
+# 7: glacier
+config = ImageConfig(pixel_size=2.5, shape=(4, 512, 512))
+strat = Stratification(clc_distribution={5: 0.1, 3: 0.2, 2: 0, 1: 0.6, 4: 0.2, 7: 0, 6: 0},
                        window_treshhold={5: 0, 3: 0.2, 2: 0, 1: 0.1, 4: 0.20, 7: 0, 6: 0},
                        num_samples='max')
 
