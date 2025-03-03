@@ -16,7 +16,7 @@ from stratification import Stratification
 
 
 class Sampler:
-    def __init__(self, sample_path, outpath_cropped_corine, corine_path, aggregate, config, stratification, verbose=False):
+    def __init__(self, sample_path, outpath_cropped_corine, corine_path, aggregate, rng, config, stratification, verbose=False):
         """
         Initialize the RasterReader with a given file path.
         """
@@ -24,6 +24,7 @@ class Sampler:
         self.corine_path = corine_path
         self.outpath_cropped_corine = outpath_cropped_corine
         self.aggregate = aggregate
+        self.rng = rng
         self.config = config
         self.stratification = stratification
         self.verbose = verbose
@@ -31,94 +32,6 @@ class Sampler:
         self.lambert = 'EPSG:31287'
         self.wgs = 'EPSG:4326'
         self.corine = None
-        self.corine_landcover = {111: "Continuous urban fabric",
-                                 112: "Discontinuous urban fabric",
-                                 121: "Industrial or commercial units",
-                                 122: "Road and rail networks and associated land",
-                                 123: "Port areas",
-                                 124: "Airports",
-                                 131: "Mineral extraction sites",
-                                 132: "Dump sites",
-                                 133: "Construction sites",
-                                 141: "Green urban areas",
-                                 142: "Sport and leisure facilities",
-                                 211: "Non-irrigated arable land",
-                                 212: "Permanently irrigated land",
-                                 213: "Rice fields",
-                                 221: "Vineyards",
-                                 222: "Fruit trees and berry plantations",
-                                 223: "Olive groves",
-                                 231: "Pastures",
-                                 241: "Annual crops associated with permanent crops",
-                                 242: "Complex cultivation patterns",
-                                 243: "Land principally occupied by agriculture, with significant areas of natural vegetation",
-                                 244: "Agro-forestry areas",
-                                 311: "Broad-leaved forest",
-                                 312: "Coniferous forest",
-                                 313: "Mixed forest",
-                                 321: "Natural grasslands",
-                                 322: "Moors and heathland",
-                                 323: "Sclerophyllous vegetation",
-                                 324: "Transitional woodland-shrub",
-                                 331: "Beaches, dunes, sands",
-                                 332: "Bare rocks",
-                                 333: "Sparsely vegetated areas",
-                                 334: "Burnt areas",
-                                 335: "Glaciers and perpetual snow",
-                                 411: "Inland marshes",
-                                 412: "Peat bogs",
-                                 421: "Salt marshes",
-                                 422: "Salines",
-                                 423: "Intertidal flats",
-                                 511: "Water courses",
-                                 512: "Water bodies",
-                                 521: "Coastal lagoons",
-                                 522: "Estuaries",
-                                 523: "Sea and ocean"}
-        self.clc_agg = {111: "urban",
-                        112: "urban",
-                        121: "urban",
-                        122: "urban",
-                        123: "urban",
-                        124: "urban",
-                        131: "urban",
-                        132: "urban",
-                        133: "urban",
-                        141: "urban",
-                        142: "urban",
-                        511: "water",
-                        512: "water",
-                        521: "water",
-                        522: "water",
-                        523: "water",
-                        211: "agricultural",
-                        212: "agricultural",
-                        213: "agricultural",
-                        221: "agricultural",
-                        222: "agricultural",
-                        223: "agricultural",
-                        231: "agricultural",
-                        241: "agricultural",
-                        242: "agricultural",
-                        243: "agricultural",
-                        244: "agricultural",
-                        311: "forest",
-                        312: "forest",
-                        313: "forest",
-                        321: "other",
-                        322: "other",
-                        323: "other",
-                        324: "other",
-                        331: "other",
-                        332: "bare_rock",
-                        333: "other",
-                        334: "other",
-                        335: "glacier",
-                        411: "other",
-                        412: "other",
-                        421: "other",
-                        422: "other",
-                        423: "other"}
         self.clc_agg_int = {111: 1,  # "urban"
                         112: 1,  # "urban"
                         121: 1,  # "urban"
@@ -323,7 +236,7 @@ class Sampler:
             # calculate the percentage of each class in this window, if it exceeds the treshhold include it a attribute
             dist = {v: c/csum for v, c in zip(vals, counts) if v != self.corine.nodata}
 
-            # go over distributions if its over the threshhold change its flag to true
+            # go over distributions if its over the threshold change its flag to true
             for k, v in dist.items():
                 if v >= self.stratification.window_threshold[k]:
                     points_corine_filtered.at[i, f'{k}'] = 1
@@ -333,7 +246,6 @@ class Sampler:
         return points_corine_filtered
 
     def select_samples(self, df):
-        #rewrite pretty!
         # select smaple size
         num_samples = 0
         if self.stratification.num_samples == 'max':
@@ -341,46 +253,52 @@ class Sampler:
         else:
             num_samples = self.stratification.num_samples
 
-        # sort stratification classes
-        sorted_strat = dict(sorted(self.stratification.clc_filtered.items(), key=lambda item: item[1], reverse=True))
-        # assign placeholder for displaying for which class the point was selecTed
         df['class'] = 0
 
-        metas = {}
-        meta_prct = {}
-        meta_prct_diffs = {}
-        for clc, perc in sorted_strat.items():
-            df_filtered = df[df[f'{clc}_dist'] > 0].copy()
-            df_filtered.sort_values(by=f'{clc}_dist', inplace=True, ascending=False)
+        meta_df = pd.DataFrame({
+            'target_percentage': self.stratification.clc_filtered.values()
+        }, index=self.stratification.clc_filtered.keys())
 
-            # check for which class the difference between wanted and sampled classes is the largest
-            metas[clc] = df_filtered
-            meta_prct[clc] = len(df_filtered)/len(df)
-            meta_prct_diffs[clc] = len(df_filtered) / len(df) - sorted_strat[clc]
+        filtered_dfs = {}
 
-        sorted_meta_prct_diffs = dict(sorted(meta_prct_diffs.items(), key=lambda item: item[1], reverse=False))
+        # Iterate over each class and its percentage in sorted_strat
+        for clc, row in meta_df.sort_values(by='target_percentage', ascending=False).iterrows():
+            # Filter the dataframe based on the class column
+            df_filtered = df[df[f'{clc}_dist'] > 0]
 
-        min_num = []
+            # Calculate the percentage
+            percentage = len(df_filtered) / len(df)
+            # Calculate the percentage difference
+            percentage_diff = percentage - row.target_percentage
+            filtered_len = len(df_filtered)
 
-        for k, v in sorted_meta_prct_diffs.items():
-            # i have less samples available than I would like -> adapt mAximal number of samples possible
-            if v < 0:
-                avail_ = len(metas[k])
-                min_num.append(int(avail_ / sorted_strat[k]))
+            # calculate the minimum sample size
+            if percentage_diff < 0:
+                if filtered_len <= 0:
+                    meta_df.loc[clc, 'min_sample'] = None
+                    print(f'Warning: Class {clc} is not represented at all, will not consider it and continue with stratification.')
+                else:
+                    meta_df.loc[clc, 'min_sample'] = int(filtered_len / row.target_percentage)
             # I have enough samples, just gibe me all of them
             else:
-                min_num.append(num_samples)
+                meta_df.loc[clc, 'min_sample'] = num_samples
 
-        min_sample = min(min_num)
+            meta_df.loc[clc, 'percentage'] = percentage
+            meta_df.loc[clc, 'percentage_diff'] = percentage_diff
+            meta_df.loc[clc, 'length'] = filtered_len
+            # svae Seperated dataframe in dict with common key
+            filtered_dfs[clc] = df_filtered
+
+        min_sample = min(meta_df.min_sample)
 
         # give me the samples with the highest amount of pixels with eAch class in them!
         agg_dfs = {}
-        for k, v in metas.items():
+        for clc, row in meta_df.iterrows():
             # calculate number of samples of adapted maximal number
-            sample_num = sorted_strat[k] * min_sample
-            sub_sample = v[:int(sample_num)].copy()
-            sub_sample['class'] = k
-            agg_dfs[k] = sub_sample
+            sample_num = row.target_percentage * min_sample
+            sub_sample = filtered_dfs[clc][:int(sample_num)].copy()
+            sub_sample['class'] = clc
+            agg_dfs[clc] = sub_sample
 
         print('stratification:' + ''.join([f'\n    {round(len(v)/min_sample, 4)*100}%, {len(v)} of {min_sample} samples for class {k}' for k, v in agg_dfs.items()]))
         stratified_points = pd.concat(agg_dfs)
@@ -400,7 +318,7 @@ class Sampler:
         df['id'] = df.index
         return df
 
-    def generate_sample(self, num_points, aoi=None, sample_method='random', to_sample_crs='EPSG:4326', rng=1414):
+    def generate_sample(self, num_points, aoi=None, sample_method='random', to_sample_crs='EPSG:4326'):
         print('Generating samples..')
         if self.corine is None:
             print('Corine Dataset not loaded... loading now')
@@ -409,7 +327,7 @@ class Sampler:
         if aoi is None:
             aoi = self.border_austria
         if sample_method == 'random':
-            sample = aoi.sample_points(size=num_points, rng=rng)
+            sample = aoi.sample_points(size=num_points, rng=self.rng)
             points = gpd.GeoDataFrame(geometry=[p for p in sample[0].geoms], crs=aoi.crs)
         else:
             sample = self.even_sample(gdf=aoi, config=self.config)
@@ -434,10 +352,10 @@ class Sampler:
 
         if self.verbose:
             print(f'Generated {len(selected)} sample points in given AOI.')
-        selected.to_file(f'output/sample_{sample_method}_stratified_full.gpkg', driver='GPKG')
+        selected.to_file(f'output/{self.sample_path}.gpkg', driver='GPKG')
 
-        out_pd = self.generate_download_file(selected)
-        out_pd.to_csv(f'output/sample_{sample_method}_download.csv', index=False)
+        # out_pd = self.generate_download_file(selected)
+        # out_pd.to_csv(f'output/sample_{sample_method}_download.csv', index=False)
 
         return
 
@@ -450,29 +368,120 @@ class Sampler:
 # 6: bare_rock
 # 7: glacier
 config = ImageConfig(pixel_size=2.5, shape=(4, 512, 512))
-strat = Stratification(clc_distribution={1: 0.4, 2: 0.01, 3: 0.225, 4: 0.225, 5: 0.1, 6: 0.03, 7: 0.01},
+strat = Stratification(clc_distribution={1: 0.45, 2: 0.01, 3: 0.25, 4: 0.25, 5: 0.01, 6: 0.02, 7: 0.01},
                        window_threshold={1: 0.1, 2: 0.5, 3: 0.5, 4: 0.5, 5: 0.5, 6: 0.5, 7: 0.5},
                        num_samples='max')
 
-sampler = Sampler(sample_path='',
+sampler = Sampler(sample_path='verification',
                   corine_path="data/corine/CLC2018ACC_V2018_20.tif",
                   outpath_cropped_corine="data/corine/corine_transformed_aggregated.tif",
                   aggregate=True,
                   verbose=True,
                   config=config,
+                  rng=1441,
                   stratification=strat)
 
 sampler.load_corine()
 
 
 # greatEr vienna
-#aoi_bbox = shapely.box(567222, 445325, 671295, 545245)
+aoi_bbox_ = shapely.box(567222, 445325, 671295, 545245)
 # Vienna
 aoi_bbox = shapely.box(616294, 472362.1, 638000, 491000)
-aoi = gpd.GeoDataFrame(geometry=[aoi_bbox], crs='EPSG:31287')
+vienna = gpd.GeoDataFrame(geometry=[aoi_bbox], crs='EPSG:31287')
+vienna_greater = gpd.GeoDataFrame(geometry=[aoi_bbox_], crs='EPSG:31287')
 
 t1 = time.time()
-sampler.generate_sample(num_points=53000, aoi=aoi, sample_method='even')
+sampler.generate_sample(num_points=53000, aoi=vienna_greater, sample_method='even')
 print('sampling for whole Austria [s]: ', round(time.time() - t1, 2))
 
 pass
+
+clc_agg = {111: "urban",
+                        112: "urban",
+                        121: "urban",
+                        122: "urban",
+                        123: "urban",
+                        124: "urban",
+                        131: "urban",
+                        132: "urban",
+                        133: "urban",
+                        141: "urban",
+                        142: "urban",
+                        511: "water",
+                        512: "water",
+                        521: "water",
+                        522: "water",
+                        523: "water",
+                        211: "agricultural",
+                        212: "agricultural",
+                        213: "agricultural",
+                        221: "agricultural",
+                        222: "agricultural",
+                        223: "agricultural",
+                        231: "agricultural",
+                        241: "agricultural",
+                        242: "agricultural",
+                        243: "agricultural",
+                        244: "agricultural",
+                        311: "forest",
+                        312: "forest",
+                        313: "forest",
+                        321: "other",
+                        322: "other",
+                        323: "other",
+                        324: "other",
+                        331: "other",
+                        332: "bare_rock",
+                        333: "other",
+                        334: "other",
+                        335: "glacier",
+                        411: "other",
+                        412: "other",
+                        421: "other",
+                        422: "other",
+                        423: "other"}
+corine_landcover = {111: "Continuous urban fabric",
+                                 112: "Discontinuous urban fabric",
+                                 121: "Industrial or commercial units",
+                                 122: "Road and rail networks and associated land",
+                                 123: "Port areas",
+                                 124: "Airports",
+                                 131: "Mineral extraction sites",
+                                 132: "Dump sites",
+                                 133: "Construction sites",
+                                 141: "Green urban areas",
+                                 142: "Sport and leisure facilities",
+                                 211: "Non-irrigated arable land",
+                                 212: "Permanently irrigated land",
+                                 213: "Rice fields",
+                                 221: "Vineyards",
+                                 222: "Fruit trees and berry plantations",
+                                 223: "Olive groves",
+                                 231: "Pastures",
+                                 241: "Annual crops associated with permanent crops",
+                                 242: "Complex cultivation patterns",
+                                 243: "Land principally occupied by agriculture, with significant areas of natural vegetation",
+                                 244: "Agro-forestry areas",
+                                 311: "Broad-leaved forest",
+                                 312: "Coniferous forest",
+                                 313: "Mixed forest",
+                                 321: "Natural grasslands",
+                                 322: "Moors and heathland",
+                                 323: "Sclerophyllous vegetation",
+                                 324: "Transitional woodland-shrub",
+                                 331: "Beaches, dunes, sands",
+                                 332: "Bare rocks",
+                                 333: "Sparsely vegetated areas",
+                                 334: "Burnt areas",
+                                 335: "Glaciers and perpetual snow",
+                                 411: "Inland marshes",
+                                 412: "Peat bogs",
+                                 421: "Salt marshes",
+                                 422: "Salines",
+                                 423: "Intertidal flats",
+                                 511: "Water courses",
+                                 512: "Water bodies",
+                                 521: "Coastal lagoons",
+                                 522: "Estuaries",
+                                 523: "Sea and ocean"}
