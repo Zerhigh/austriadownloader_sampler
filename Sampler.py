@@ -253,11 +253,13 @@ class Sampler:
         else:
             num_samples = self.stratification.num_samples
 
-        df['class'] = 0
+        df['class'] = None
+        df = df.sample(frac=1, random_state=self.rng)
 
         meta_df = pd.DataFrame({
             'target_percentage': self.stratification.clc_filtered.values()
         }, index=self.stratification.clc_filtered.keys())
+        meta_df['class'] = meta_df.index.astype(str)
 
         filtered_dfs = {}
 
@@ -291,19 +293,48 @@ class Sampler:
 
         min_sample = min(meta_df.min_sample)
 
-        # give me the samples with the highest amount of pixels with eAch class in them!
-        agg_dfs = {}
         for clc, row in meta_df.iterrows():
             # calculate number of samples of adapted maximal number
-            sample_num = row.target_percentage * min_sample
-            sub_sample = filtered_dfs[clc][:int(sample_num)].copy()
-            sub_sample['class'] = clc
-            agg_dfs[clc] = sub_sample
+            if pd.notna(row.min_sample):
+                meta_df.loc[clc, 'assigned_samples'] = row.target_percentage * min_sample
+            else:
+                meta_df.loc[clc, 'assigned_samples'] = 0
 
-        print('stratification:' + ''.join([f'\n    {round(len(v)/min_sample, 4)*100}%, {len(v)} of {min_sample} samples for class {k}' for k, v in agg_dfs.items()]))
-        stratified_points = pd.concat(agg_dfs)
+        class_dist_cols = [col for col in df.columns if col.endswith('_dist')]
+        class_labels = [col.split('_dist')[0] for col in class_dist_cols]
 
-        return stratified_points
+        # Add a column for the best class prediction
+        df['best_class'] = df[class_dist_cols].idxmax(axis=1).str.replace('_dist', '')
+
+        quota = {str(k): v.assigned_samples for k, v in meta_df.iterrows()}
+        class_counts = {key: 0 for key in quota}
+
+        # Assign classes while respecting quotas
+        for idx, row in df.iterrows():
+            best_class = row['best_class']
+
+            # Only assign if quota isn't full
+            if best_class in quota and class_counts[best_class] < quota[best_class]:
+                df.at[idx, 'class'] = best_class
+                class_counts[best_class] += 1
+
+        # Assign remaining unassigned rows to any class with available slots
+        for idx, row in df.iterrows():
+            if pd.isna(row['class']):
+                # Check if row is still unassigned: sorte on distribution
+                sorted_rows = row[class_dist_cols].sort_values(ascending=False)
+                for index, value in sorted_rows.items():
+                    if value > 0:
+                        cl = index.replace('_dist', '')
+                        if class_counts[cl] < quota[cl]:
+                            df.at[idx, 'class'] = cl
+                            class_counts[cl] += 1
+                            break  # Stop once assigned
+
+        df = df.dropna(subset=['class'])
+        class_counts = df['class'].value_counts()
+        meta_df['class_counts'] = meta_df['class'].map(class_counts)
+        return df, meta_df
 
     def generate_download_file(self, gdf):
         if gdf.crs != self.wgs:
@@ -348,14 +379,16 @@ class Sampler:
         points_corine_filtered = self.filter_samples(gdf=points, window_size=self.config.window_size) #self.config.window_size
 
         # select saple of points from datarame
-        selected = self.select_samples(df=points_corine_filtered)
+        selected, meta = self.select_samples(df=points_corine_filtered)
+        print(meta)
 
         if self.verbose:
             print(f'Generated {len(selected)} sample points in given AOI.')
         selected.to_file(f'output/{self.sample_path}.gpkg', driver='GPKG')
+        meta.to_csv(f'output/{self.sample_path}_metadata.csv')
 
-        # out_pd = self.generate_download_file(selected)
-        # out_pd.to_csv(f'output/sample_{sample_method}_download.csv', index=False)
+        out_pd = self.generate_download_file(selected)
+        out_pd.to_csv(f'output/sample_{sample_method}_download.csv', index=False)
 
         return
 
@@ -368,8 +401,8 @@ class Sampler:
 # 6: bare_rock
 # 7: glacier
 config = ImageConfig(pixel_size=2.5, shape=(4, 512, 512))
-strat = Stratification(clc_distribution={1: 0.45, 2: 0.01, 3: 0.25, 4: 0.25, 5: 0.01, 6: 0.02, 7: 0.01},
-                       window_threshold={1: 0.1, 2: 0.5, 3: 0.5, 4: 0.5, 5: 0.5, 6: 0.5, 7: 0.5},
+strat = Stratification(clc_distribution={1: 0.45, 2: 0.01, 3: 0.25, 4: 0.25, 5: 0.02, 6: 0.01, 7: 0.01},
+                       window_threshold={1: 0.05, 2: 0.1, 3: 0.1, 4: 0.1, 5: 0.1, 6: 0.1, 7: 0.1},
                        num_samples='max')
 
 sampler = Sampler(sample_path='verification',
@@ -392,7 +425,7 @@ vienna = gpd.GeoDataFrame(geometry=[aoi_bbox], crs='EPSG:31287')
 vienna_greater = gpd.GeoDataFrame(geometry=[aoi_bbox_], crs='EPSG:31287')
 
 t1 = time.time()
-sampler.generate_sample(num_points=53000, aoi=vienna_greater, sample_method='even')
+sampler.generate_sample(num_points=53000, aoi=None, sample_method='even')
 print('sampling for whole Austria [s]: ', round(time.time() - t1, 2))
 
 pass
