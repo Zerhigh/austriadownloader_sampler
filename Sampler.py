@@ -325,7 +325,7 @@ class Sampler:
 
             # go over distributions if its over the threshhold change its flag to true
             for k, v in dist.items():
-                if v >= self.stratification.window_treshhold[k]:
+                if v >= self.stratification.window_threshold[k]:
                     points_corine_filtered.at[i, f'{k}'] = 1
                     # save space in dataframe
                     points_corine_filtered.at[i, f'{k}_dist'] = int(round(v, 2)*100)
@@ -450,8 +450,8 @@ class Sampler:
 # 6: bare_rock
 # 7: glacier
 config = ImageConfig(pixel_size=2.5, shape=(4, 512, 512))
-strat = Stratification(clc_distribution={5: 0.1, 3: 0.2, 2: 0, 1: 0.6, 4: 0.2, 7: 0, 6: 0},
-                       window_treshhold={5: 0, 3: 0.2, 2: 0, 1: 0.1, 4: 0.20, 7: 0, 6: 0},
+strat = Stratification(clc_distribution={1: 0.4, 2: 0.01, 3: 0.225, 4: 0.225, 5: 0.1, 6: 0.03, 7: 0.01},
+                       window_threshold={1: 0.1, 2: 0.5, 3: 0.5, 4: 0.5, 5: 0.5, 6: 0.5, 7: 0.5},
                        num_samples='max')
 
 sampler = Sampler(sample_path='',
@@ -472,7 +472,7 @@ aoi_bbox = shapely.box(616294, 472362.1, 638000, 491000)
 aoi = gpd.GeoDataFrame(geometry=[aoi_bbox], crs='EPSG:31287')
 
 t1 = time.time()
-sampler.generate_sample(num_points=53000, aoi=None, sample_method='even')
+sampler.generate_sample(num_points=53000, aoi=aoi, sample_method='even')
 print('sampling for whole Austria [s]: ', round(time.time() - t1, 2))
 
 pass
