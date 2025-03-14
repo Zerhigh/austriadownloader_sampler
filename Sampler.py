@@ -1,5 +1,6 @@
 import os.path
 import time
+from datetime import datetime
 
 import geopandas as gpd
 import numpy as np
@@ -79,12 +80,34 @@ class Sampler:
                     }
         self.clc_keys = [1, 2, 3, 4, 5, 6, 7]
 
+
     @property
     def border_austria(self):
         fp_austria = 'data/matched_metadata.gpkg'
         fp = gpd.read_file(fp_austria)
         border = shapely.union_all(fp.geometry)
         return gpd.GeoDataFrame(geometry=[border], crs=fp.crs)
+
+    def convert_date(self, date_str: str) -> datetime:
+        """
+        Convert a German date string to a datetime object.
+
+        :param date_str: The input date string in 'dd-Mon-yy' format with German month names.
+        :return: A datetime object.
+        :raises ValueError: If the date string is incorrectly formatted.
+        """
+        try:
+            day, month, year = date_str.split("-")
+            german_to_english_months = {
+                "Jan": "Jan", "Feb": "Feb", "Mär": "Mar", "Apr": "Apr", "Mai": "May",
+                "Jun": "Jun", "Jul": "Jul", "Aug": "Aug", "Sep": "Sep", "Okt": "Oct",
+                "Nov": "Nov", "Dez": "Dec"
+            }
+
+            month = german_to_english_months.get(month, month)
+            return datetime.strptime(f"{day}-{month}-{year}", "%d-%b-%y")
+        except Exception as e:
+            raise ValueError(f"Error parsing date {date_str}: {e}")
 
     def transform_corine(self, src, outpath):
         try:
@@ -336,20 +359,35 @@ class Sampler:
         meta_df['class_counts'] = meta_df['class'].map(class_counts)
         return df, meta_df
 
-    def generate_download_file(self, gdf):
+    def generate_download_file(self, gdf, keep_geom=True):
         if gdf.crs != self.wgs:
             gdf = gdf.to_crs(self.wgs)
         gdf['lat'] = gdf.geometry.y
         gdf['lon'] = gdf.geometry.x
 
-        columns_to_keep = ['lat', 'lon', 'corine', 'class']  # Replace with your column names
+        columns_to_keep = ['geometry', 'lat', 'lon', 'corine', 'class', 'query_day', 'ARCHIVNR', 'Operat', 'vector_url', 'RGB_raster', 'NIR_raster', 'prevTime', 'Date']  # Replace with your column names
+        if not keep_geom:
+            columns_to_keep.remove('geometry')
 
         df = gdf.loc[:, columns_to_keep]
         df.reset_index(drop=True, inplace=True)
-        df['id'] = df.index
+        df['id'] = df.index.astype(str)
         return df
 
-    def generate_sample(self, num_points, aoi=None, sample_method='random', to_sample_crs='EPSG:4326'):
+
+    def add_date(self, gdf):
+        fp_austria = 'data/matched_metadata.gpkg'
+        orthophoto_meta = gpd.read_file(fp_austria)
+        orthophoto_meta['beginLifeS'] = orthophoto_meta['beginLifeS'].apply(self.convert_date)
+        orthophoto_meta['endLifeSpa'] = orthophoto_meta['endLifeSpa'].apply(self.convert_date)
+        orthophoto_meta['query_day'] = orthophoto_meta['beginLifeS'] + (orthophoto_meta['endLifeSpa'] - orthophoto_meta['beginLifeS']) / 2
+
+        intersection = gpd.sjoin(gdf, orthophoto_meta, how='left', predicate='intersects')
+
+        return intersection
+
+
+    def generate_sample(self, num_points, aoi=None, apply_prestratification=True, sample_method='random', to_sample_crs='EPSG:4326'):
         print('Generating samples..')
         if self.corine is None:
             print('Corine Dataset not loaded... loading now')
@@ -378,17 +416,27 @@ class Sampler:
         # assign attributes to sampeld points basd on window operation
         points_corine_filtered = self.filter_samples(gdf=points, window_size=self.config.window_size) #self.config.window_size
 
-        # select saple of points from datarame
-        selected, meta = self.select_samples(df=points_corine_filtered)
-        print(meta)
+        if apply_prestratification:
+            # select saple of points from datarame
+            selected, meta = self.select_samples(df=points_corine_filtered)
+            print(meta)
+            meta.to_csv(f'output/{self.sample_path}_meta.csv')
+        else:
+            selected = points_corine_filtered
+            selected['class'] = selected['corine']
+
+        selected_wmeta = self.add_date(selected)
 
         if self.verbose:
-            print(f'Generated {len(selected)} sample points in given AOI.')
-        selected.to_file(f'output/{self.sample_path}.gpkg', driver='GPKG')
-        meta.to_csv(f'output/{self.sample_path}_metadata.csv')
+            print(f'Generated {len(selected_wmeta)} sample points in given AOI.')
+        selected_wmeta.to_file(f'output/{self.sample_path}.gpkg', driver='GPKG')
 
-        out_pd = self.generate_download_file(selected)
-        out_pd.to_csv(f'output/sample_{sample_method}_download.csv', index=False)
+        # used to download gee Sentinel2 Data
+        selected_reduced = self.generate_download_file(selected_wmeta)
+        selected_reduced.to_file(f'output/{self.sample_path}_wdate.gpkg', driver='GPKG')
+
+        out_pd = self.generate_download_file(selected_wmeta, keep_geom=False)
+        out_pd.to_csv(f'output/{self.sample_path}.csv', index=False)
 
         return
 
@@ -405,7 +453,7 @@ strat = Stratification(clc_distribution={1: 0.45, 2: 0.01, 3: 0.25, 4: 0.25, 5: 
                        window_threshold={1: 0.05, 2: 0.1, 3: 0.1, 4: 0.1, 5: 0.1, 6: 0.1, 7: 0.1},
                        num_samples='max')
 
-sampler = Sampler(sample_path='verification',
+sampler = Sampler(sample_path='stratified_ALL_S2_points',
                   corine_path="data/corine/CLC2018ACC_V2018_20.tif",
                   outpath_cropped_corine="data/corine/corine_transformed_aggregated.tif",
                   aggregate=True,
@@ -425,7 +473,7 @@ vienna = gpd.GeoDataFrame(geometry=[aoi_bbox], crs='EPSG:31287')
 vienna_greater = gpd.GeoDataFrame(geometry=[aoi_bbox_], crs='EPSG:31287')
 
 t1 = time.time()
-sampler.generate_sample(num_points=53000, aoi=None, sample_method='even')
+sampler.generate_sample(num_points=53000, aoi=None, sample_method='even', apply_prestratification=False)
 print('sampling for whole Austria [s]: ', round(time.time() - t1, 2))
 
 pass
