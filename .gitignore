@@ -1,6 +1,7 @@
 .idea
 data
 output/older_sampels/*
+output
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

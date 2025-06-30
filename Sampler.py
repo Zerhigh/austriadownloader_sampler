@@ -11,6 +11,8 @@ from rasterio.mask import mask
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from shapely.geometry import Point
 from tqdm import tqdm
+from pathlib import Path
+import pathlib
 
 from imageconfig import ImageConfig
 from stratification import Stratification
@@ -82,11 +84,17 @@ class Sampler:
 
 
     @property
-    def border_austria(self):
+    def border_austria_matched_metadata(self):
         fp_austria = 'data/matched_metadata.gpkg'
         fp = gpd.read_file(fp_austria)
         border = shapely.union_all(fp.geometry)
         return gpd.GeoDataFrame(geometry=[border], crs=fp.crs)
+
+    @property
+    def border_austria(self):
+        fp_austria = Path('data/oesterreich_border/oesterreich.shp')
+        fp = gpd.read_file(fp_austria)
+        return fp
 
     def convert_date(self, date_str: str) -> datetime:
         """
@@ -216,15 +224,20 @@ class Sampler:
         # Get bounding box
         # iterate over all provided aois
         cell_size = config.pixel_size * config.shape[1]
-        point_list = []
 
-        minx, miny, maxx, maxy = gdf.iloc[0].geometry.bounds
+        geom = gdf.iloc[0].geometry
+        minx, miny, maxx, maxy = geom.bounds
+
+        point_list = []
 
         # Create a grid of points
         x_coords = np.arange(minx, maxx, cell_size) + (cell_size / 2)
         y_coords = np.arange(miny, maxy, cell_size) + (cell_size / 2)
 
-        return [Point(x, y) for x in x_coords for y in y_coords]
+        points = [Point(x, y) for x in x_coords for y in y_coords if geom.intersects(Point(x, y))]
+        if self.verbose:
+            print(f'Filtered {len(x_coords)*len(y_coords) - len(points)} points with intersection of boundary')
+        return points
 
     def filter_window(self, pt, window_size=None):
         if window_size is None:
@@ -243,7 +256,7 @@ class Sampler:
 
     def filter_samples(self, gdf, window_size=None):
         # filter noData values
-        points_corine_filtered = gdf.drop(gdf[gdf['corine'] == self.corine.nodata].index)
+        points_corine_filtered = gdf.drop(gdf[gdf['sampled_corine'] == self.corine.nodata].index)
         if self.verbose and len(points_corine_filtered) != len(gdf):
             print(f'Dropped {len(gdf) - len(points_corine_filtered)} entries due to NoData values.')
 
@@ -365,7 +378,7 @@ class Sampler:
         gdf['lat'] = gdf.geometry.y
         gdf['lon'] = gdf.geometry.x
 
-        columns_to_keep = ['geometry', 'lat', 'lon', 'corine', 'class', 'query_day', 'ARCHIVNR', 'Operat', 'vector_url', 'RGB_raster', 'NIR_raster', 'prevTime', 'Date']  # Replace with your column names
+        columns_to_keep = ['geometry', 'lat', 'lon', 'corine', 'sampled_corine', 'query_day', 'ARCHIVNR', 'Operat', 'vector_url', 'RGB_raster', 'NIR_raster', 'prevTime', 'Date', 'beginLifeS', 'endLifeSpa']  # Replace with your column names
         if not keep_geom:
             columns_to_keep.remove('geometry')
 
@@ -373,7 +386,6 @@ class Sampler:
         df.reset_index(drop=True, inplace=True)
         df['id'] = df.index.astype(str)
         return df
-
 
     def add_date(self, gdf):
         fp_austria = 'data/matched_metadata.gpkg'
@@ -385,7 +397,6 @@ class Sampler:
         intersection = gpd.sjoin(gdf, orthophoto_meta, how='left', predicate='intersects')
 
         return intersection
-
 
     def generate_sample(self, num_points, aoi=None, apply_prestratification=True, sample_method='random', to_sample_crs='EPSG:4326'):
         print('Generating samples..')
@@ -406,7 +417,7 @@ class Sampler:
         assert points.crs == self.lambert and self.corine.crs == self.lambert
 
         coord_list = [(x, y) for x, y in zip(points["geometry"].x, points["geometry"].y)]
-        points['corine'] = [x[0] for x in self.corine.sample(coord_list)]
+        points['sampled_corine'] = [x[0] for x in self.corine.sample(coord_list)]
 
         # add class-tagging columns to df
         for col in self.clc_keys:
@@ -422,8 +433,12 @@ class Sampler:
             print(meta)
             meta.to_csv(f'output/{self.sample_path}_meta.csv')
         else:
+            # seelct most prevalent class in the sample for 'class'
+            max_col = points_corine_filtered.filter(regex='dist_*').idxmax(axis=1)
+            points_corine_filtered['corine'] = max_col.str.replace('_dist', '', regex=True)
             selected = points_corine_filtered
-            selected['class'] = selected['corine']
+            # selected = points_corine_filtered
+            # selected['class'] = selected['corine']
 
         selected_wmeta = self.add_date(selected)
 
@@ -433,7 +448,7 @@ class Sampler:
 
         # used to download gee Sentinel2 Data
         selected_reduced = self.generate_download_file(selected_wmeta)
-        selected_reduced.to_file(f'output/{self.sample_path}_wdate.gpkg', driver='GPKG')
+        selected_reduced.to_file(f'output/{self.sample_path}_s2download.gpkg', driver='GPKG')
 
         out_pd = self.generate_download_file(selected_wmeta, keep_geom=False)
         out_pd.to_csv(f'output/{self.sample_path}.csv', index=False)
@@ -450,10 +465,10 @@ class Sampler:
 # 7: glacier
 config = ImageConfig(pixel_size=2.5, shape=(4, 512, 512))
 strat = Stratification(clc_distribution={1: 0.45, 2: 0.01, 3: 0.25, 4: 0.25, 5: 0.02, 6: 0.01, 7: 0.01},
-                       window_threshold={1: 0.05, 2: 0.1, 3: 0.1, 4: 0.1, 5: 0.1, 6: 0.1, 7: 0.1},
+                       window_threshold={1: 0.01, 2: 0.01, 3: 0.01, 4: 0.01, 5: 0.01, 6: 0.01, 7: 0.01},
                        num_samples='max')
 
-sampler = Sampler(sample_path='stratified_ALL_S2_points',
+sampler = Sampler(sample_path='demo',
                   corine_path="data/corine/CLC2018ACC_V2018_20.tif",
                   outpath_cropped_corine="data/corine/corine_transformed_aggregated.tif",
                   aggregate=True,
@@ -471,9 +486,10 @@ aoi_bbox_ = shapely.box(567222, 445325, 671295, 545245)
 aoi_bbox = shapely.box(616294, 472362.1, 638000, 491000)
 vienna = gpd.GeoDataFrame(geometry=[aoi_bbox], crs='EPSG:31287')
 vienna_greater = gpd.GeoDataFrame(geometry=[aoi_bbox_], crs='EPSG:31287')
+demo_ = gpd.GeoDataFrame(geometry=[shapely.box(592406, 420561, 601846, 428517)], crs='EPSG:31287')
 
 t1 = time.time()
-sampler.generate_sample(num_points=53000, aoi=None, sample_method='even', apply_prestratification=False)
+sampler.generate_sample(num_points=53000, aoi=demo_, sample_method='even', apply_prestratification=False)
 print('sampling for whole Austria [s]: ', round(time.time() - t1, 2))
 
 pass
