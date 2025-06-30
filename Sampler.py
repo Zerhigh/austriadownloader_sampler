@@ -110,8 +110,11 @@ class Sampler:
 
         return intersection
 
-    def generate_sample(self, sample_path, num_points, aoi=None, sample_method='random'):
-        print('Generating samples..')
+    def generate_sample(self, output_path, num_points, aoi=None, sample_method='random'):
+        if self.verbose:
+            print('Generating samples..')
+            print(f'Sampling method: {sample_method}')
+
         if aoi is None:
             aoi = self.border_austria
         if sample_method == 'random':
@@ -126,32 +129,41 @@ class Sampler:
         if self.verbose:
             print(f'Generated {len(selected_wmeta)} sample points in given AOI.')
 
-        selected_wmeta.to_file(f'output/{sample_path}.gpkg', driver='GPKG')
+        output_path_full = f'output/{output_path}'
+        if not Path('output').exists():
+            Path('output').mkdir(exist_ok=True)
+        selected_wmeta.to_file(f'{output_path_full}.gpkg', driver='GPKG')
 
         # used to download gee Sentinel2 Data
         selected_reduced = self.generate_download_file(selected_wmeta)
-        selected_reduced.to_file(f'output/{sample_path}_s2download.gpkg', driver='GPKG')
+        selected_reduced.to_file(f'{output_path_full}_s2download.gpkg', driver='GPKG')
 
         out_pd = self.generate_download_file(selected_wmeta, keep_geom=False)
-        out_pd.to_csv(f'output/{sample_path}.csv', index=False)
+        out_pd.to_csv(f'{output_path_full}.csv', index=False)
         return
 
 
-# greatEr vienna
-aoi_bbox_ = shapely.box(567222, 445325, 671295, 545245)
-vienna_greater = gpd.GeoDataFrame(geometry=[aoi_bbox_], crs='EPSG:31287')
+if __name__ == "__main__":
+    # Greater vienna area
+    vienna_greater = gpd.GeoDataFrame(geometry=[shapely.box(567222, 445325, 671295, 545245)],
+                                      crs='EPSG:31287')
 
-# Vienna
-aoi_bbox = shapely.box(616294, 472362.1, 638000, 491000)
-vienna = gpd.GeoDataFrame(geometry=[aoi_bbox], crs='EPSG:31287')
+    # Vienna
+    vienna = gpd.GeoDataFrame(geometry=[shapely.box(616294, 472362.1, 638000, 491000)],
+                              crs='EPSG:31287')
 
-# demo
-demo_ = gpd.GeoDataFrame(geometry=[shapely.box(592406, 420561, 601846, 428517)], crs='EPSG:31287')
+    # Demo Area
+    demo_ = gpd.GeoDataFrame(geometry=[shapely.box(592406, 420561, 601846, 428517)],
+                             crs='EPSG:31287')
 
-sampler = Sampler(verbose=True,
-                  config=ImageConfig(pixel_size=2.5, shape=(4, 512, 512)),
-                  rng=1441)
+    # Define sampler class
+    sampler = Sampler(verbose=True,
+                      config=ImageConfig(pixel_size=2.5, shape=(4, 512, 512)),
+                      rng=1441)
 
-t1 = time.time()
-sampler.generate_sample(sample_path='demo_full', num_points=53000, aoi=None, sample_method='even')
-print('sampling for whole Austria [s]: ', round(time.time() - t1, 2))
+    t1 = time.time()
+    sampler.generate_sample(output_path='demo_full',
+                            num_points=53000,
+                            aoi=None,
+                            sample_method='even')
+    print('sampling for whole Austria [s]: ', round(time.time() - t1, 2))
