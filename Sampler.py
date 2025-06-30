@@ -69,15 +69,23 @@ class Sampler:
         # Get bounding box
         # iterate over all provided aois
         cell_size = config.pixel_size * config.shape[1]
+        points = []
 
-        geom = gdf.iloc[0].geometry
-        minx, miny, maxx, maxy = geom.bounds
+        for i, row in gdf.iterrows():
+            geom = row['geometry']
 
-        # Create a grid of points
-        x_coords = np.arange(minx, maxx, cell_size) + (cell_size / 2)
-        y_coords = np.arange(miny, maxy, cell_size) + (cell_size / 2)
+            minx, miny, maxx, maxy = geom.bounds
 
-        points = [Point(x, y) for x in x_coords for y in y_coords if geom.intersects(Point(x, y))]
+            # Create a grid of points
+            x_coords = np.arange(minx, maxx, cell_size) + (cell_size / 2)
+            y_coords = np.arange(miny, maxy, cell_size) + (cell_size / 2)
+            pass
+
+            for x in x_coords:
+                for y in y_coords:
+                    if geom.intersects(Point(x, y)):
+                        points.append(Point(x, y))
+
         if self.verbose:
             print(f'Filtered {len(x_coords)*len(y_coords) - len(points)} points with intersection of boundary')
         return points
@@ -154,13 +162,20 @@ if __name__ == "__main__":
     demo_ = gpd.GeoDataFrame(geometry=[shapely.box(592406, 420561, 601846, 428517)],
                              crs='EPSG:31287')
 
+    # lakes requests
+    lakes = gpd.GeoDataFrame(geometry=[shapely.box(643286, 422503, 663798, 454725),
+                                       shapely.box(440517, 295426, 475534, 313339),
+                                       shapely.box(392604, 430935, 423143, 453110)
+                                       ],
+                             crs='EPSG:31287')
+
     # Define sampler class
     sampler = Sampler(verbose=True,
-                      config=ImageConfig(pixel_size=2.5, shape=(4, 512, 512)),
+                      config=ImageConfig(pixel_size=20, shape=(3, 512, 512)),
                       rng=1441)
 
     t1 = time.time()
-    sampler.generate_sample(output_path='demo_full',
+    sampler.generate_sample(output_path='demo',
                             num_points=53000,
                             aoi=None,
                             sample_method='even')
