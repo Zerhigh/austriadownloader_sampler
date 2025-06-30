@@ -73,8 +73,6 @@ class Sampler:
         geom = gdf.iloc[0].geometry
         minx, miny, maxx, maxy = geom.bounds
 
-        point_list = []
-
         # Create a grid of points
         x_coords = np.arange(minx, maxx, cell_size) + (cell_size / 2)
         y_coords = np.arange(miny, maxy, cell_size) + (cell_size / 2)
